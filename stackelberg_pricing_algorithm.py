@@ -114,10 +114,16 @@ class IntegerPackSolver:
             content = content_params[content_id]
             
             if item['type'] == 'storage':
-                # 检查存储约束
-                if used_storage + content.S <= constraints['C_s']:
-                    t_i[content_id] += 1.0
-                    used_storage += content.S
+                # 检查存储约束 - 计算可存储的最大时间
+                remaining_capacity = constraints['C_s'] - used_storage
+                if remaining_capacity >= content.S:
+                    # 计算最优存储时间（考虑时间窗口T和收益密度）
+                    max_time_by_capacity = remaining_capacity / content.S
+                    # 存储时间不应超过时间窗口T
+                    optimal_time = min(max_time_by_capacity, 1.0)  # 标准化到[0,1]区间
+                    if optimal_time > 0:
+                        t_i[content_id] = optimal_time
+                        used_storage += content.S * optimal_time
                     
             elif item['type'] == 'hit':
                 # 检查带宽约束
@@ -217,18 +223,18 @@ class StackelbergPricingAlgorithm:
                     gain_tr.append(tr_gain)
                 
                 # 构建约束条件
-            constraints = {
+                constraints = {
                     'C_s': node.C_s * T,
                     'r_b': node.r_b * T,
                     'r_c': node.r_c * T,
                     'R': node.R,
                     'Phi': node.Phi
-            }
-            
-            # 求解整数背包问题
-            t_i, n_i, m_i = self.pack_solver.solve(
-                gain_stor, gain_hit, gain_tr, constraints, content_params
-            )
+                }
+                
+                # 求解整数背包问题
+                t_i, n_i, m_i = self.pack_solver.solve(
+                    gain_stor, gain_hit, gain_tr, constraints, content_params
+                )
             
             # 存储分配结果
             allocations['t'][i] = t_i

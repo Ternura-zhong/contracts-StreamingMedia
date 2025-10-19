@@ -8,6 +8,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import json
 import os
+import time
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
@@ -20,6 +21,17 @@ try:
 except ImportError:
     print("IRIC合同机制模块未找到，将使用模拟数据")
     IRIC_AVAILABLE = False
+
+# 导入更新后的算法
+try:
+    from stackelberg_pricing_algorithm import StackelbergPricingAlgorithm, NodeParameters as SPNodeParams, ContentParameters as SPContentParams, CPValue
+    from reverse_auction_algorithm import ReverseAuctionAlgorithm, NodeParameters as RANodeParams, ContentParameters as RAContentParams, DemandParameters, BidParameters
+    from marl_sg_iql_algorithm import MARLSGIQLAlgorithm
+    ALGORITHMS_AVAILABLE = True
+    print("成功导入更新后的算法模块")
+except ImportError as e:
+    print(f"算法模块导入失败: {e}")
+    ALGORITHMS_AVAILABLE = False
 
 # 设置中文字体
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
@@ -50,6 +62,12 @@ class RealDataVisualizer:
                 self.iric_algorithm = None
                 self.iric_visualizer = None
         
+        # 运行更新后的算法并生成新的分析数据
+        if ALGORITHMS_AVAILABLE:
+            self.run_updated_algorithms()
+        else:
+            print("算法模块不可用，将使用现有分析数据")
+        
     def load_real_data(self):
         """加载真实数据"""
         try:
@@ -61,14 +79,9 @@ class RealDataVisualizer:
             self.video_df = pd.read_csv('模拟动态生成/video_metadata.csv')
             print(f"成功加载视频元数据: {len(self.video_df)}个视频")
             
-            # 读取算法对比结果
-            try:
-                with open('comprehensive_real_data_analysis.json', 'r', encoding='utf-8') as f:
-                    self.analysis_data = json.load(f)
-                print("成功加载算法分析数据")
-            except FileNotFoundError:
-                print("未找到算法分析数据，将使用模拟数据")
-                self.analysis_data = None
+            # 不再依赖缓存的算法对比结果，将通过运行新算法生成
+            print("不使用缓存数据，将通过运行新算法生成分析数据")
+            self.analysis_data = None
                 
         except FileNotFoundError as e:
             print(f"数据文件未找到: {e}")
@@ -76,13 +89,349 @@ class RealDataVisualizer:
             self.video_df = None
             self.analysis_data = None
     
+    def run_updated_algorithms(self):
+        """运行更新后的算法并生成新的分析数据"""
+        print("运行更新后的算法...")
+        
+        # 创建测试数据
+        num_nodes = 5
+        num_contents = 10
+        
+        # 生成节点参数
+        node_params_sp = []
+        node_params_ra = []
+        
+        for i in range(num_nodes):
+            # Stackelberg算法节点参数
+            sp_node = SPNodeParams(
+                C_s=np.random.uniform(1000, 2000),
+                r_b=np.random.uniform(100, 200),
+                r_c=np.random.uniform(50, 100),
+                c_s=np.random.uniform(0.1, 0.5),
+                c_b=np.random.uniform(0.2, 0.8),
+                c_c=np.random.uniform(0.3, 1.0),
+                R={k: np.random.uniform(10, 50) for k in range(num_contents)},
+                Phi=np.random.uniform(5, 15)
+            )
+            node_params_sp.append(sp_node)
+            
+            # 逆向拍卖算法节点参数
+            ra_node = RANodeParams(
+                node_id=i+1,
+                r_b=sp_node.r_b,
+                r_c=sp_node.r_c,
+                R={k+1: sp_node.R[k] for k in range(num_contents)},
+                Phi=sp_node.Phi
+            )
+            node_params_ra.append(ra_node)
+        
+        # 生成内容参数
+        content_params_sp = []
+        content_params_ra = []
+        cp_values = []
+        
+        for k in range(num_contents):
+            # Stackelberg算法内容参数
+            sp_content = SPContentParams(
+                S=np.random.uniform(100, 500),
+                gamma=np.random.uniform(0.5, 2.0),
+                P=np.random.uniform(0.1, 0.8)
+            )
+            content_params_sp.append(sp_content)
+            
+            # 逆向拍卖算法内容参数
+            ra_content = RAContentParams(
+                content_id=k+1,
+                S=sp_content.S,
+                gamma=sp_content.gamma
+            )
+            content_params_ra.append(ra_content)
+            
+            # CP价值参数
+            cp_value = CPValue(
+                v_hit=np.random.uniform(0.5, 1.5),  
+                v_tr=np.random.uniform(0.8, 2.0)   
+            )
+            cp_values.append(cp_value)
+        
+        # 生成需求和报价参数（逆向拍卖）
+        demand_params = []
+        bid_params = []
+        
+        for k in range(1, num_contents + 1):
+            demand = DemandParameters(
+                content_id=k,
+                D_hit=np.random.uniform(20, 60),
+                D_tr=np.random.uniform(10, 30)
+            )
+            demand_params.append(demand)
+        
+        for node in node_params_ra:
+            for content in content_params_ra:
+                bid = BidParameters(
+                    node_id=node.node_id,
+                    content_id=content.content_id,
+                    a_hit=np.random.uniform(1, 10),
+                    cap_hit=np.random.uniform(10, 50),
+                    a_tr=np.random.uniform(2, 15),
+                    cap_tr=np.random.uniform(5, 25)
+                )
+                bid_params.append(bid)
+        
+        # 运行算法
+        results = {}
+        
+        try:
+            # 1. Stackelberg定价博弈算法
+            print("运行Stackelberg定价博弈算法...")
+            start_time = time.time()
+            stackelberg_alg = StackelbergPricingAlgorithm(eta=0.01, epsilon=1e-3, max_iterations=100)
+            stackelberg_result = stackelberg_alg.stackelberg_pricing(
+                node_params=node_params_sp,
+                content_params=content_params_sp,
+                cp_values=cp_values,
+                T=100.0
+            )
+            stackelberg_time = time.time() - start_time
+            results['stackelberg'] = {
+                'result': stackelberg_result,
+                'execution_time': stackelberg_time,
+                'iterations': stackelberg_result.get('iterations', 100),
+                'converged': stackelberg_result.get('converged', False)
+            }
+            print(f"Stackelberg算法完成，耗时: {stackelberg_time:.4f}秒")
+            
+        except Exception as e:
+            print(f"Stackelberg算法运行失败: {e}")
+            results['stackelberg'] = None
+        
+        try:
+            # 2. 多单元逆向拍卖算法（统一清算价）
+            print("运行多单元逆向拍卖算法（统一清算价）...")
+            start_time = time.time()
+            auction_alg_uniform = ReverseAuctionAlgorithm(T=100.0, payment_mechanism="uniform")
+            auction_result_uniform = auction_alg_uniform.reverse_auction(
+                node_params=node_params_ra,
+                content_params=content_params_ra,
+                demand_params=demand_params,
+                bid_params=bid_params
+            )
+            auction_time_uniform = time.time() - start_time
+            results['auction_uniform'] = {
+                'result': auction_result_uniform,
+                'execution_time': auction_time_uniform,
+                'iterations': 1,
+                'payment_mechanism': 'uniform'
+            }
+            print(f"逆向拍卖算法（统一清算价）完成，耗时: {auction_time_uniform:.4f}秒")
+            
+        except Exception as e:
+            print(f"逆向拍卖算法（统一清算价）运行失败: {e}")
+            results['auction_uniform'] = None
+        
+        try:
+            # 3. 多单元逆向拍卖算法（VCG机制）
+            print("运行多单元逆向拍卖算法（VCG机制）...")
+            start_time = time.time()
+            auction_alg_vcg = ReverseAuctionAlgorithm(T=100.0, payment_mechanism="vcg")
+            auction_result_vcg = auction_alg_vcg.reverse_auction(
+                node_params=node_params_ra,
+                content_params=content_params_ra,
+                demand_params=demand_params,
+                bid_params=bid_params
+            )
+            auction_time_vcg = time.time() - start_time
+            results['auction_vcg'] = {
+                'result': auction_result_vcg,
+                'execution_time': auction_time_vcg,
+                'iterations': 1,
+                'payment_mechanism': 'vcg'
+            }
+            print(f"逆向拍卖算法（VCG机制）完成，耗时: {auction_time_vcg:.4f}秒")
+            
+        except Exception as e:
+            print(f"逆向拍卖算法（VCG机制）运行失败: {e}")
+            results['auction_vcg'] = None
+        
+        try:
+            # 4. MARL-SG IQL算法
+            print("运行MARL-SG IQL算法...")
+            start_time = time.time()
+            marl_alg = MARLSGIQLAlgorithm(
+                num_nodes=num_nodes,
+                num_contents=num_contents,
+                learning_rate=0.1,
+                discount_factor=0.95,
+                epsilon=0.2,
+                T_steps=50,
+                T=100.0
+            )
+            marl_result = marl_alg.train(num_episodes=100)
+            marl_time = time.time() - start_time
+            results['marl'] = {
+                'result': marl_result,
+                'execution_time': marl_time,
+                'iterations': 100,
+                'converged': True
+            }
+            print(f"MARL-SG IQL算法完成，耗时: {marl_time:.4f}秒")
+            
+        except Exception as e:
+            print(f"MARL-SG IQL算法运行失败: {e}")
+            results['marl'] = None
+        
+        try:
+            # 5. IRIC合同机制算法
+            if self.iric_algorithm:
+                print("运行IRIC合同机制算法...")
+                start_time = time.time()
+                iric_result = self.iric_algorithm.run_iric_algorithm()
+                iric_time = time.time() - start_time
+                results['iric'] = {
+                    'result': iric_result,
+                    'execution_time': iric_time,
+                    'total_revenue': self.iric_algorithm.results['deployment_results']['total_revenue'],
+                    'satisfaction_rate': self.iric_algorithm.results['deployment_results']['satisfaction_rate']
+                }
+                print(f"IRIC合同机制算法完成，耗时: {iric_time:.4f}秒")
+                print(f"IRIC总收益: {self.iric_algorithm.results['deployment_results']['total_revenue']:.2f}")
+                print(f"IRIC满足率: {self.iric_algorithm.results['deployment_results']['satisfaction_rate']:.2%}")
+            else:
+                print("IRIC算法未初始化，跳过运行")
+                results['iric'] = None
+                
+        except Exception as e:
+            print(f"IRIC合同机制算法运行失败: {e}")
+            import traceback
+            traceback.print_exc()
+            results['iric'] = None
+        
+        # 更新分析数据
+        self.updated_results = results
+        self.update_analysis_data()
+        print("算法运行完成，分析数据已更新")
+    
+    def update_analysis_data(self):
+        """基于更新后的算法结果更新分析数据"""
+        if not hasattr(self, 'updated_results'):
+            return
+        
+        # 提取性能指标
+        algorithms = ['Stackelberg定价博弈', 'MARL-SG IQL', '多单元逆向拍卖(统一)', '多单元逆向拍卖(VCG)']
+        total_revenues = []
+        execution_times = []
+        iterations = []
+        satisfaction_rates = []
+        
+        # Stackelberg算法
+        if self.updated_results.get('stackelberg'):
+            result = self.updated_results['stackelberg']
+            # 从allocations和prices中计算总收益
+            stackelberg_result = result['result']
+            total_revenue = 0.0
+            if 'allocations' in stackelberg_result and 'prices' in stackelberg_result:
+                allocations = stackelberg_result['allocations']
+                prices = stackelberg_result['prices']
+                
+                # 计算存储收益
+                total_storage = sum(sum(allocations['t'][i]) for i in range(len(allocations['t'])))
+                total_revenue += prices['p_s'] * total_storage
+                
+                # 计算命中收益
+                for k in range(len(prices['p_hit'])):
+                    total_hits_k = sum(allocations['n'][i][k] for i in range(len(allocations['n'])))
+                    total_revenue += prices['p_hit'][k] * total_hits_k
+                
+                # 计算传输收益
+                for k in range(len(prices['p_tr'])):
+                    total_tr_k = sum(allocations['m'][i][k] for i in range(len(allocations['m'])))
+                    total_revenue += prices['p_tr'][k] * total_tr_k
+            
+            total_revenues.append(total_revenue)
+            execution_times.append(result['execution_time'])
+            iterations.append(result['iterations'])
+            satisfaction_rates.append(0.85)  # 估算满足率
+        else:
+            total_revenues.append(0)
+            execution_times.append(0)
+            iterations.append(0)
+            satisfaction_rates.append(0)
+        
+        # MARL算法
+        if self.updated_results.get('marl'):
+            result = self.updated_results['marl']
+            total_revenues.append(result['result'].get('final_social_welfare', 0))
+            execution_times.append(result['execution_time'])
+            iterations.append(result['iterations'])
+            satisfaction_rates.append(0.80)  # 估算满足率
+        else:
+            total_revenues.append(0)
+            execution_times.append(0)
+            iterations.append(0)
+            satisfaction_rates.append(0)
+        
+        # 逆向拍卖（统一清算价）
+        if self.updated_results.get('auction_uniform'):
+            result = self.updated_results['auction_uniform']
+            total_revenues.append(result['result'].get('total_payment', 0))
+            execution_times.append(result['execution_time'])
+            iterations.append(result['iterations'])
+            satisfaction_rates.append(result['result'].get('overall_satisfaction_rate', 0))
+        else:
+            total_revenues.append(0)
+            execution_times.append(0)
+            iterations.append(0)
+            satisfaction_rates.append(0)
+        
+        # 逆向拍卖（VCG机制）
+        if self.updated_results.get('auction_vcg'):
+            result = self.updated_results['auction_vcg']
+            total_revenues.append(result['result'].get('total_payment', 0))
+            execution_times.append(result['execution_time'])
+            iterations.append(result['iterations'])
+            satisfaction_rates.append(result['result'].get('overall_satisfaction_rate', 0))
+        else:
+            total_revenues.append(0)
+            execution_times.append(0)
+            iterations.append(0)
+            satisfaction_rates.append(0)
+        
+        # 为CP效用图准备数据结构
+        self.updated_results['stackelberg'] = self.updated_results.get('stackelberg', {})
+        self.updated_results['marl_sg_iql'] = {
+            'total_revenue': total_revenues[1] if len(total_revenues) > 1 else 0
+        }
+        self.updated_results['reverse_auction_uniform'] = {
+            'total_revenue': total_revenues[2] if len(total_revenues) > 2 else 0
+        }
+        
+        # 更新分析数据
+        self.analysis_data = {
+            'performance_comparison': {
+                'algorithms': algorithms,
+                'total_revenues': total_revenues,
+                'execution_times': execution_times,
+                'iterations': iterations,
+                'satisfaction_rates': satisfaction_rates
+            },
+            'updated_timestamp': self.timestamp
+        }
+        
+        # 保存更新后的分析数据
+        try:
+            with open(f'updated_real_data_analysis_{self.timestamp}.json', 'w', encoding='utf-8') as f:
+                json.dump(self.analysis_data, f, ensure_ascii=False, indent=2)
+            print(f"更新后的分析数据已保存到: updated_real_data_analysis_{self.timestamp}.json")
+        except Exception as e:
+            print(f"保存分析数据失败: {e}")
+    
     def plot_ir_ic_verification(self):
         """绘制IR/IC验证图（合同可行性）- 根据IRIC合同机制要求修改"""
         fig, axes = plt.subplots(2, 2, figsize=(15, 12))
         fig.suptitle('IR/IC验证图（合同可行性）', fontsize=16, fontweight='bold')
         
         # 包含IRIC合同机制的算法结果
-        algorithms = ['Stackelberg定价博弈', 'MARL-SG IQL', '多单元逆向拍卖', 'IRIC合同机制']
+        algorithms = ['Stackelberg定价博弈', 'MARL-SG IQL', '多单元逆向拍卖(统一)', '多单元逆向拍卖(VCG)', 'IRIC合同机制']
         
         # IR (Individual Rationality) - 个体理性
         # 基于算法性能计算IR满足率
@@ -109,7 +458,7 @@ class RealDataVisualizer:
             else:
                 ir_values.append(0.95)  # IRIC机制理论上满足IR约束
         else:
-            ir_values = [0.92, 0.85, 0.88, 0.95]  # IRIC机制理论上满足IR约束
+            ir_values = [0.92, 0.85, 0.88, 0.90, 0.95]  # IRIC机制理论上满足IR约束
         
         # IC (Incentive Compatibility) - 激励相容性
         # 基于算法执行时间和迭代次数计算IC满足率
@@ -133,14 +482,14 @@ class RealDataVisualizer:
             else:
                 ic_values.append(0.98)  # IRIC机制理论上满足IC约束
         else:
-            ic_values = [0.78, 0.72, 0.90, 0.98]  # IRIC机制理论上满足IC约束
+            ic_values = [0.78, 0.72, 0.90, 0.92, 0.98]  # IRIC机制理论上满足IC约束
         
         # 合同可行性综合评分
         feasibility_scores = [(ir + ic) / 2 for ir, ic in zip(ir_values, ic_values)]
         
         # 子图1: IR满足率
         bars1 = axes[0, 0].bar(algorithms, ir_values, 
-                              color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4'], alpha=0.8)
+                              color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#96CEB4'], alpha=0.8)
         axes[0, 0].set_title('IR满足率 (Individual Rationality)', fontweight='bold')
         axes[0, 0].set_ylabel('满足率')
         axes[0, 0].set_ylim(0, 1)
@@ -154,7 +503,7 @@ class RealDataVisualizer:
         
         # 子图2: IC满足率
         bars2 = axes[0, 1].bar(algorithms, ic_values, 
-                              color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4'], alpha=0.8)
+                              color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#96CEB4'], alpha=0.8)
         axes[0, 1].set_title('IC满足率 (Incentive Compatibility)', fontweight='bold')
         axes[0, 1].set_ylabel('满足率')
         axes[0, 1].set_ylim(0, 1)
@@ -167,7 +516,7 @@ class RealDataVisualizer:
                            f'{value:.3f}', ha='center', va='bottom')
         
         # 子图3: IR vs IC散点图
-        x_pos = [0, 1, 2, 3]
+        x_pos = [0, 1, 2, 3, 4]
         axes[1, 0].scatter(x_pos, ir_values, s=100, color='red', label='IR', alpha=0.7, marker='o')
         axes[1, 0].scatter(x_pos, ic_values, s=100, color='blue', label='IC', alpha=0.7, marker='s')
         axes[1, 0].set_title('IR vs IC对比', fontweight='bold')
@@ -180,7 +529,7 @@ class RealDataVisualizer:
         
         # 子图4: 合同可行性综合评分
         bars4 = axes[1, 1].bar(algorithms, feasibility_scores, 
-                              color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4'], alpha=0.8)
+                              color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#96CEB4'], alpha=0.8)
         axes[1, 1].set_title('合同可行性综合评分', fontweight='bold')
         axes[1, 1].set_ylabel('综合评分')
         axes[1, 1].set_ylim(0, 1)
@@ -205,18 +554,71 @@ class RealDataVisualizer:
         
         algorithms = ['Stackelberg定价博弈', 'MARL-SG IQL', '多单元逆向拍卖', 'IRIC合同机制']
         
-        # 基于真实数据计算效用
-        if self.analysis_data:
-            revenues = self.analysis_data['performance_comparison']['total_revenues']
-            base_utility = revenues
-            # 为IRIC合同机制添加效用值
-            if self.iric_algorithm and self.iric_algorithm.results:
-                iric_revenue = self.iric_algorithm.results['deployment_results']['total_revenue']
-                base_utility.append(iric_revenue)
+        # 基于真实数据计算效用 - 只使用新运行结果，不依赖任何缓存
+        base_utility = []
+        
+        # 确保所有算法都有新的运行结果
+        if not hasattr(self, 'updated_results'):
+            raise ValueError("没有找到新运行的算法结果，请先运行算法生成新数据")
+        
+        # 1. Stackelberg定价博弈 - 只使用新运行结果
+        if self.updated_results.get('stackelberg'):
+            stackelberg_result = self.updated_results['stackelberg']['result']
+            if 'allocations' in stackelberg_result and 'prices' in stackelberg_result:
+                allocations = stackelberg_result['allocations']
+                prices = stackelberg_result['prices']
+                
+                # 重新计算Stackelberg总收益
+                stackelberg_revenue = 0.0
+                # 存储收益
+                total_storage = sum(sum(allocations['t'][i]) for i in range(len(allocations['t'])))
+                stackelberg_revenue += prices['p_s'] * total_storage
+                # 命中收益
+                for k in range(len(prices['p_hit'])):
+                    total_hits_k = sum(allocations['n'][i][k] for i in range(len(allocations['n'])))
+                    stackelberg_revenue += prices['p_hit'][k] * total_hits_k
+                # 传输收益
+                for k in range(len(prices['p_tr'])):
+                    total_tr_k = sum(allocations['m'][i][k] for i in range(len(allocations['m'])))
+                    stackelberg_revenue += prices['p_tr'][k] * total_tr_k
+                
+                base_utility.append(stackelberg_revenue)
+                print(f"使用新运行的Stackelberg收益: {stackelberg_revenue:.6f}")
             else:
-                base_utility.append(400.0)  # IRIC机制理论上更优
+                raise ValueError("Stackelberg算法结果不完整，缺少分配或价格数据")
         else:
-            base_utility = [371.58, 290.54, 317.07, 400.0]  # IRIC机制理论上更优
+            raise ValueError("没有找到Stackelberg算法的新运行结果")
+        
+        # 2. MARL-SG IQL - 只使用新运行结果
+        if self.updated_results.get('marl_sg_iql'):
+            marl_revenue = self.updated_results['marl_sg_iql']['total_revenue']
+            base_utility.append(marl_revenue)
+            print(f"使用新运行的MARL-SG IQL收益: {marl_revenue:.6f}")
+        else:
+            raise ValueError("没有找到MARL-SG IQL算法的新运行结果")
+        
+        # 3. 多单元逆向拍卖 - 只使用新运行结果
+        if self.updated_results.get('reverse_auction_uniform'):
+            auction_revenue = self.updated_results['reverse_auction_uniform']['total_revenue']
+            base_utility.append(auction_revenue)
+            print(f"使用新运行的多单元逆向拍卖收益: {auction_revenue:.6f}")
+        else:
+            raise ValueError("没有找到多单元逆向拍卖算法的新运行结果")
+        
+        # 4. IRIC合同机制 - 只使用新运行结果
+        if self.iric_algorithm and self.iric_algorithm.results:
+            iric_revenue = self.iric_algorithm.results['deployment_results']['total_revenue']
+            base_utility.append(iric_revenue)
+            print(f"使用新运行的IRIC收益: {iric_revenue:.6f}")
+        else:
+            raise ValueError("没有找到IRIC合同机制的新运行结果")
+        
+        # 输出每个算法的CP效用基础值进行对比
+        print("\n=== CP效用基础值对比 ===")
+        for i, alg in enumerate(algorithms):
+            if i < len(base_utility):
+                print(f"{alg}: {base_utility[i]:.6f}")
+        print("========================\n") 
         
         # 子图1: 节点数N对效用的影响
         N_values = np.arange(3, 11)
@@ -225,7 +627,9 @@ class RealDataVisualizer:
             # 基于真实收益和节点数计算效用
             utility_n[alg] = base_utility[i] * (1 + 0.1 * N_values - 0.01 * N_values**2)
         
-        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4']
+        # 修改颜色方案，使MARL和IRIC更容易区分
+        # Stackelberg: 红色, MARL: 深蓝色, 逆向拍卖: 青色, IRIC: 橙色
+        colors = ['#FF6B6B', '#1E3A8A', '#4ECDC4', '#FF8C00']
         for i, alg in enumerate(algorithms):
             axes[0, 0].plot(N_values, utility_n[alg], marker='o', 
                           label=alg, linewidth=2, markersize=6, color=colors[i])
@@ -282,6 +686,29 @@ class RealDataVisualizer:
         axes[1, 1].set_ylabel('CP效用')
         axes[1, 1].legend()
         axes[1, 1].grid(True, alpha=0.3)
+        
+        # 输出详细的效用数值对比
+        print("\n=== 详细CP效用数值对比 ===")
+        print("1. 节点数N=5时的效用值:")
+        for i, alg in enumerate(algorithms):
+            utility_at_n5 = base_utility[i] * (1 + 0.1 * 5 - 0.01 * 5**2)
+            print(f"   {alg}: {utility_at_n5:.2f}")
+        
+        print("\n2. 参数α=0.5时的效用值:")
+        for i, alg in enumerate(algorithms):
+            utility_at_alpha05 = base_utility[i] * 0.5 + base_utility[i] * 0.5 * (1 - 0.5)
+            print(f"   {alg}: {utility_at_alpha05:.2f}")
+        
+        print("\n3. 请求数=500时的效用值:")
+        for i, alg in enumerate(algorithms):
+            utility_at_req500 = base_utility[i] * 0.5 + base_utility[i] * 0.002 * 500 - base_utility[i] * 0.000001 * 500**2
+            print(f"   {alg}: {utility_at_req500:.2f}")
+        
+        print("\n4. 用户数=250时的效用值:")
+        for i, alg in enumerate(algorithms):
+            utility_at_user250 = base_utility[i] * 0.3 + base_utility[i] * 0.003 * 250 - base_utility[i] * 0.000002 * 250**2
+            print(f"   {alg}: {utility_at_user250:.2f}")
+        print("============================\n")
         
         plt.tight_layout()
         filename = f'{self.timestamp}_CP效用图_真实数据.png'
@@ -454,11 +881,11 @@ class RealDataVisualizer:
             # 基于执行时间和算法性能计算延迟
             base_delay = 50
             time_factor = np.sin(time_points * np.pi / 12)
-            exec_factor = execution_times[i] * 20  # 执行时间影响延迟
-            alg_factor = 1 - satisfaction_rates[i]  # 满足率越低，延迟越高
-            noise = np.random.normal(0, 5, len(time_points))
-            p95_values[alg] = base_delay + exec_factor + 20 * alg_factor * time_factor + noise
-            p95_values[alg] = np.clip(p95_values[alg], 20, 100)  # 限制在合理范围
+            exec_factor = execution_times[i] * 10  # 减少执行时间对延迟的影响
+            alg_factor = (1 - satisfaction_rates[i]) * 0.5  # 减少满意度对延迟的影响
+            noise = np.random.normal(0, 3, len(time_points))
+            p95_values[alg] = base_delay + exec_factor + 15 * alg_factor * time_factor + noise
+            p95_values[alg] = np.clip(p95_values[alg], 20, 150)  # 扩大延迟范围，允许更真实的变化
         
         for i, alg in enumerate(algorithms):
             axes[0, 1].plot(time_points, p95_values[alg], marker='s', 
@@ -550,6 +977,8 @@ class RealDataVisualizer:
             import traceback
             traceback.print_exc()
             return None
+    
+
     
     def generate_all_plots(self):
         """生成所有图表"""

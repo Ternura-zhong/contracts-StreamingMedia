@@ -53,8 +53,9 @@ class BidParameters:
 class ReverseAuctionAlgorithm:
     """多单元逆向拍卖算法"""
     
-    def __init__(self, T: float = 100.0):
+    def __init__(self, T: float = 100.0, payment_mechanism: str = "uniform"):
         self.T = T  # 时间窗口
+        self.payment_mechanism = payment_mechanism  # 支付机制: "uniform" 或 "vcg"
         self.used_band = {}  # 各节点已使用带宽
         self.used_comp = {}  # 各节点已使用计算资源
         
@@ -229,12 +230,27 @@ class ReverseAuctionAlgorithm:
                           hit_allocations: Dict,
                           tr_allocations: Dict,
                           hit_prices: Dict,
-                          tr_prices: Dict) -> Dict:
+                          tr_prices: Dict,
+                          bid_params: List[BidParameters] = None,
+                          content_params: List[ContentParameters] = None,
+                          demand_params: List[DemandParameters] = None,
+                          node_params: List[NodeParameters] = None) -> Dict:
         """
-        计算统一清算价支付
+        计算支付（支持统一清算价和VCG机制）
         
-        对每个节点 i: 支付_i ← Σ_k ( p_k^hit * x_{i,k} + p_k^tr * y_{i,k} )
+        对每个节点 i: 
+        - 统一清算价: 支付_i ← Σ_k ( p_k^hit * x_{i,k} + p_k^tr * y_{i,k} )
+        - VCG机制: 支付_i ← 边际贡献价值
         """
+        if self.payment_mechanism == "vcg" and all(param is not None for param in [bid_params, content_params, demand_params, node_params]):
+            return self._calculate_vcg_payments(hit_allocations, tr_allocations, 
+                                              bid_params, content_params, demand_params, node_params)
+        else:
+            return self._calculate_uniform_payments(hit_allocations, tr_allocations, hit_prices, tr_prices)
+    
+    def _calculate_uniform_payments(self, hit_allocations: Dict, tr_allocations: Dict, 
+                                   hit_prices: Dict, tr_prices: Dict) -> Dict:
+        """计算统一清算价支付"""
         payments = {}
         
         # 获取所有节点ID
@@ -262,6 +278,111 @@ class ReverseAuctionAlgorithm:
             payments[node_id] = payment
         
         return payments
+    
+    def _calculate_vcg_payments(self, hit_allocations: Dict, tr_allocations: Dict,
+                               bid_params: List[BidParameters], content_params: List[ContentParameters],
+                               demand_params: List[DemandParameters], node_params: List[NodeParameters]) -> Dict:
+        """
+        计算VCG支付
+        VCG支付 = 其他节点的总价值损失
+        """
+        payments = {}
+        all_nodes = set()
+        
+        # 获取所有节点ID
+        for node_id in hit_allocations.keys():
+            all_nodes.add(node_id)
+        for node_id in tr_allocations.keys():
+            all_nodes.add(node_id)
+        
+        # 计算总社会福利（包含所有节点）
+        total_welfare = self._calculate_social_welfare(hit_allocations, tr_allocations, bid_params, demand_params)
+        
+        for target_node in all_nodes:
+            # 计算排除该节点后的最优分配和社会福利
+            filtered_bids = [bid for bid in bid_params if bid.node_id != target_node]
+            filtered_nodes = [node for node in node_params if node.node_id != target_node]
+            
+            if filtered_bids and filtered_nodes:
+                # 重新分配（排除目标节点）
+                hit_alloc_without, tr_alloc_without, _, _ = self._allocate_without_node(
+                    content_params, demand_params, filtered_bids, filtered_nodes)
+                
+                welfare_without = self._calculate_social_welfare(hit_alloc_without, tr_alloc_without, 
+                                                               filtered_bids, demand_params)
+                
+                # VCG支付 = 其他节点的价值损失
+                payments[target_node] = max(0, welfare_without - (total_welfare - self._get_node_welfare(
+                    target_node, hit_allocations, tr_allocations, bid_params)))
+            else:
+                payments[target_node] = 0.0
+        
+        return payments
+    
+    def _calculate_social_welfare(self, hit_allocations: Dict, tr_allocations: Dict,
+                                 bid_params: List[BidParameters], demand_params: List[DemandParameters]) -> float:
+        """计算社会福利"""
+        welfare = 0.0
+        
+        # 计算满足的需求价值（假设单位需求价值为100）
+        for demand in demand_params:
+            content_id = demand.content_id
+            
+            # 命中服务满足的需求
+            hit_satisfied = sum(hit_allocations.get(node_id, {}).get(content_id, 0) 
+                              for node_id in hit_allocations.keys())
+            hit_satisfied = min(hit_satisfied, demand.D_hit)
+            welfare += hit_satisfied * 100  # 假设单位命中价值为100
+            
+            # 转码任务满足的需求
+            tr_satisfied = sum(tr_allocations.get(node_id, {}).get(content_id, 0) 
+                             for node_id in tr_allocations.keys())
+            tr_satisfied = min(tr_satisfied, demand.D_tr)
+            welfare += tr_satisfied * 80   # 假设单位转码价值为80
+        
+        # 减去节点成本
+        for bid in bid_params:
+            node_id = bid.node_id
+            content_id = bid.content_id
+            
+            hit_alloc = hit_allocations.get(node_id, {}).get(content_id, 0)
+            tr_alloc = tr_allocations.get(node_id, {}).get(content_id, 0)
+            
+            welfare -= hit_alloc * bid.a_hit + tr_alloc * bid.a_tr
+        
+        return welfare
+    
+    def _get_node_welfare(self, node_id: int, hit_allocations: Dict, tr_allocations: Dict,
+                         bid_params: List[BidParameters]) -> float:
+        """计算特定节点的福利贡献"""
+        welfare = 0.0
+        
+        for bid in bid_params:
+            if bid.node_id == node_id:
+                content_id = bid.content_id
+                hit_alloc = hit_allocations.get(node_id, {}).get(content_id, 0)
+                tr_alloc = tr_allocations.get(node_id, {}).get(content_id, 0)
+                
+                # 节点提供的价值减去成本
+                welfare += hit_alloc * 100 + tr_alloc * 80 - (hit_alloc * bid.a_hit + tr_alloc * bid.a_tr)
+        
+        return welfare
+    
+    def _allocate_without_node(self, content_params: List[ContentParameters],
+                              demand_params: List[DemandParameters],
+                              bid_params: List[BidParameters],
+                              node_params: List[NodeParameters]) -> Tuple[Dict, Dict, Dict, Dict]:
+        """在排除特定节点的情况下重新分配"""
+        # 重置资源使用
+        self.reset_resource_usage(node_params)
+        
+        # 重新分配
+        hit_allocations, hit_prices, _ = self.allocate_hit_services(
+            content_params, demand_params, bid_params, node_params)
+        tr_allocations, tr_prices, _ = self.allocate_transcoding_tasks(
+            content_params, demand_params, bid_params, node_params)
+        
+        return hit_allocations, tr_allocations, hit_prices, tr_prices
     
     def reverse_auction(self,
                       node_params: List[NodeParameters],
@@ -299,7 +420,8 @@ class ReverseAuctionAlgorithm:
         
         # 3. 计算支付
         payments = self.calculate_payments(
-            hit_allocations, tr_allocations, hit_prices, tr_prices)
+            hit_allocations, tr_allocations, hit_prices, tr_prices,
+            bid_params, content_params, demand_params, node_params)
         
         # 4. 计算统计信息
         total_payment = sum(payments.values())
@@ -450,19 +572,46 @@ def print_results(result: Dict):
 
 
 if __name__ == "__main__":
-    # 加载数据
+    # 加载测试数据
     cdn_df, video_df = load_test_data()
     
     # 创建测试场景
     node_params, content_params, demand_params, bid_params = create_test_scenario(
         cdn_df, video_df, num_nodes=5, num_contents=10)
     
-    # 创建算法实例
-    algorithm = ReverseAuctionAlgorithm(T=100.0)
+    print("=" * 80)
+    print("多单元逆向拍卖算法对比测试")
+    print("=" * 80)
     
-    # 运行算法
-    result = algorithm.reverse_auction(
+    # 测试统一清算价机制
+    print("\n1. 统一清算价机制 (Uniform Clearing Price)")
+    print("-" * 50)
+    algorithm_uniform = ReverseAuctionAlgorithm(T=100.0, payment_mechanism="uniform")
+    result_uniform = algorithm_uniform.reverse_auction(
         node_params, content_params, demand_params, bid_params)
+    print_results(result_uniform)
     
-    # 打印结果
-    print_results(result)
+    # 测试VCG支付机制
+    print("\n2. VCG支付机制 (Vickrey-Clarke-Groves)")
+    print("-" * 50)
+    algorithm_vcg = ReverseAuctionAlgorithm(T=100.0, payment_mechanism="vcg")
+    result_vcg = algorithm_vcg.reverse_auction(
+        node_params, content_params, demand_params, bid_params)
+    print_results(result_vcg)
+    
+    # 对比分析
+    print("\n3. 支付机制对比分析")
+    print("-" * 50)
+    print(f"统一清算价总支付: {result_uniform['total_payment']:.2f}")
+    print(f"VCG机制总支付: {result_vcg['total_payment']:.2f}")
+    print(f"支付差异: {abs(result_vcg['total_payment'] - result_uniform['total_payment']):.2f}")
+    print(f"统一清算价满足率: {result_uniform['overall_satisfaction_rate']:.2%}")
+    print(f"VCG机制满足率: {result_vcg['overall_satisfaction_rate']:.2%}")
+    
+    # 激励机制分析
+    print(f"\n激励机制强度对比:")
+    uniform_payments = list(result_uniform['payments'].values())
+    vcg_payments = list(result_vcg['payments'].values())
+    print(f"统一清算价支付方差: {np.var(uniform_payments):.2f}")
+    print(f"VCG机制支付方差: {np.var(vcg_payments):.2f}")
+    print(f"VCG机制提供了{'更强' if np.var(vcg_payments) > np.var(uniform_payments) else '更弱'}的差异化激励")
